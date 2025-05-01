@@ -1,22 +1,27 @@
 // mt7902_skeleton.c – Minimal PCIe skeleton driver for MediaTek MT7902 Wi‑Fi card
 //
-// v0.2.1 – 01 May 2025
-//   * IRQ tahsis bayrağında PCI_IRQ_LEGACY derleyicide mevcut değilse
-//     PCI_IRQ_ALL_TYPES kullanılıyor (çekirdek 6.11+’de isim değişikliği).
-//   * Hata yönetimi mesajları minör iyileştirildi.
+// v0.3 – 01 May 2025
+//   * Firmware varlığını doğrulayan basit yükleyici eklendi
+//     (request_firmware → boyutu günlüğe bas, release_firmware).
+//   * Hâlen donanıma yazmıyor; amaç: /lib/firmware yolunun ve blob’un
+//     doğru konumlandığını test etmek.
+//   * IRQ kodu v0.2.1’den aynen korunuyor.
 //
 // SPDX‑License‑Identifier: GPL‑2.0
 
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
+#include <linux/firmware.h>
 #include <linux/etherdevice.h>
 
-#define DRV_NAME "mt7902_skeleton"
+#define DRV_NAME        "mt7902_skeleton"
 #define MT7902_PCI_VENDOR 0x14c3
 #define MT7902_PCI_DEVICE 0x7902
 
-MODULE_DESCRIPTION("Skeleton + IRQ handler for MediaTek MT7902");
+#define MT7902_FW_NAME  "mediatek/mt7902.bin"
+
+MODULE_DESCRIPTION("Skeleton + IRQ + firmware‑presence test for MediaTek MT7902");
 MODULE_AUTHOR("<Your Name>");
 MODULE_LICENSE("GPL");
 
@@ -34,12 +39,30 @@ struct mt7902_dev {
     int             irq_vec;
 };
 
+/* ───────────── firmware loader ───────────── */
+static int mt7902_load_firmware(struct mt7902_dev *mdev)
+{
+    const struct firmware *fw;
+    int ret;
+
+    ret = request_firmware(&fw, MT7902_FW_NAME, &mdev->pdev->dev);
+    if (ret) {
+        dev_err(&mdev->pdev->dev, "firmware '%s' bulunamadı (ret=%d)\n", MT7902_FW_NAME, ret);
+        return ret;
+    }
+
+    dev_info(&mdev->pdev->dev, "firmware ok: %zu bayt\n", fw->size);
+
+    /* TODO: DMA ile FW’yi karta yaz ve READY bayrağını bekle */
+
+    release_firmware(fw);
+    return 0;
+}
+
 /* ───────────── IRQ handler ───────────── */
 static irqreturn_t mt7902_irq(int irq, void *ctx)
 {
     struct mt7902_dev *mdev = ctx;
-
-    /* TODO: IRQ status register clear */
     dev_dbg(&mdev->pdev->dev, "IRQ hit (vec=%d)\n", irq);
     return IRQ_HANDLED;
 }
@@ -81,6 +104,11 @@ static int mt7902_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     pci_set_master(pdev);
 
+    /* ── Firmware doğrulaması ── */
+    err = mt7902_load_firmware(mdev);
+    if (err)
+        goto err_unmap;
+
     /* ── IRQ vektör tahsisi ── */
 #ifdef PCI_IRQ_ALL_TYPES
     err = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
@@ -93,15 +121,14 @@ static int mt7902_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
     mdev->irq_vec = pci_irq_vector(pdev, 0);
 
-    err = devm_request_irq(&pdev->dev, mdev->irq_vec, mt7902_irq,
-                           0, DRV_NAME, mdev);
+    err = devm_request_irq(&pdev->dev, mdev->irq_vec, mt7902_irq, 0, DRV_NAME, mdev);
     if (err) {
         dev_err(&pdev->dev, "request_irq başarısız (%d)\n", err);
         goto err_irq;
     }
 
     pci_set_drvdata(pdev, mdev);
-    dev_info(&pdev->dev, "[%s] skeleton + IRQ hazır (vec %d)\n", DRV_NAME, mdev->irq_vec);
+    dev_info(&pdev->dev, "[%s] skeleton + FW‑check + IRQ hazır (vec %d)\n", DRV_NAME, mdev->irq_vec);
     return 0;
 
 err_irq:
@@ -123,7 +150,6 @@ static void mt7902_remove(struct pci_dev *pdev)
 
     if (mdev->regs)
         iounmap(mdev->regs);
-
     pci_free_irq_vectors(pdev);
     pci_release_regions(pdev);
     pci_disable_device(pdev);
