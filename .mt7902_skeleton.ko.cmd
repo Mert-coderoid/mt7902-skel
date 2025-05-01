@@ -1,0 +1,1 @@
+savedcmd_/home/mert/dev/mt7902-skel/mt7902_skeleton.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T scripts/module.lds -o /home/mert/dev/mt7902-skel/mt7902_skeleton.ko /home/mert/dev/mt7902-skel/mt7902_skeleton.o /home/mert/dev/mt7902-skel/mt7902_skeleton.mod.o

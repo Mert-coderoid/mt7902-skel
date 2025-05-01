@@ -1,0 +1,1 @@
+savedcmd_/home/mert/dev/mt7902-skel/mt7902_skeleton.mod := printf '%s\n'   mt7902_skeleton.o | awk '!x[$$0]++ { print("/home/mert/dev/mt7902-skel/"$$0) }' > /home/mert/dev/mt7902-skel/mt7902_skeleton.mod
