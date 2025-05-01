@@ -1231,6 +1231,9 @@ deps_/home/mert/dev/mt7902-skel/mt7902_skeleton.o := \
     $(wildcard include/config/DMA_API_DEBUG) \
     $(wildcard include/config/NEED_DMA_MAP_STATE) \
   include/linux/dma-direction.h \
+  include/linux/firmware.h \
+    $(wildcard include/config/FW_LOADER) \
+    $(wildcard include/config/FW_UPLOAD) \
   include/linux/etherdevice.h \
     $(wildcard include/config/HAVE_EFFICIENT_UNALIGNED_ACCESS) \
   include/linux/if_ether.h \
@@ -1553,6 +1556,7 @@ deps_/home/mert/dev/mt7902-skel/mt7902_skeleton.o := \
   arch/x86/include/generated/asm/unaligned.h \
   include/asm-generic/unaligned.h \
   include/linux/unaligned/packed_struct.h \
+  include/linux/iopoll.h \
 
 /home/mert/dev/mt7902-skel/mt7902_skeleton.o: $(deps_/home/mert/dev/mt7902-skel/mt7902_skeleton.o)
 

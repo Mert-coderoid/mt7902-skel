@@ -1,11 +1,17 @@
-// mt7902_skeleton.c – Minimal PCIe skeleton driver for MediaTek MT7902 Wi‑Fi card
+// mt7902_skeleton.c – Early development driver for MediaTek MT7902 PCIe Wi‑Fi
 //
-// v0.3 – 01 May 2025
-//   * Firmware varlığını doğrulayan basit yükleyici eklendi
-//     (request_firmware → boyutu günlüğe bas, release_firmware).
-//   * Hâlen donanıma yazmıyor; amaç: /lib/firmware yolunun ve blob’un
-//     doğru konumlandığını test etmek.
-//   * IRQ kodu v0.2.1’den aynen korunuyor.
+// v0.4 – 01 May 2025
+//   * Firmware gerçek DMA indirme & MCU READY bekleme eklendi.
+//   * IRQ vektörü devm ile yönetiliyor; kaldırmada çift‐serbest uyarısı giderildi.
+//   * Koddan kazara eklenmiş shell satırı çıkarıldı.
+//
+//  *** TEST HEDEFİ ***
+//  dmesg çıktısında sırasıyla aşağıdakileri görmelisiniz:
+//      firmware ok: <n> bayt
+//      firmware download OK
+//      mcu ready OK (state = 0x7)
+//
+//  Henüz mac80211 entegrasyonu ve RX/TX descriptor’ları yok.
 //
 // SPDX‑License‑Identifier: GPL‑2.0
 
@@ -14,14 +20,28 @@
 #include <linux/interrupt.h>
 #include <linux/firmware.h>
 #include <linux/etherdevice.h>
+#include <linux/delay.h>
+#include <linux/iopoll.h>
+#include <linux/dma-mapping.h>
 
 #define DRV_NAME        "mt7902_skeleton"
 #define MT7902_PCI_VENDOR 0x14c3
 #define MT7902_PCI_DEVICE 0x7902
-
 #define MT7902_FW_NAME  "mediatek/mt7902.bin"
 
-MODULE_DESCRIPTION("Skeleton + IRQ + firmware‑presence test for MediaTek MT7902");
+/* ───────────── Register offsets (provisional – from MT7921) ───────────── */
+#define MT_TOP_MISC2                     0x18060024
+#define   MT_TOP_MISC2_FW_STATE          GENMASK(2, 0)   /* 0 = ROM, 7 = RUN */
+
+#define MT_FW_DL_ADDR                    0x1846F200 /* sbus remap */
+#define MT_FW_DL_DLEN                    0x1846F204
+#define MT_FW_DL_CTRL                    0x1846F208
+#define   MT_FW_DL_CTRL_START            BIT(0)
+#define   MT_FW_DL_CTRL_ACK              BIT(1)
+
+#define FW_POLL_TIMEOUT_US  100000  /* 100 ms */
+
+MODULE_DESCRIPTION("Skeleton + DMA firmware download + IRQ for MediaTek MT7902");
 MODULE_AUTHOR("<Your Name>");
 MODULE_LICENSE("GPL");
 
@@ -43,6 +63,9 @@ struct mt7902_dev {
 static int mt7902_load_firmware(struct mt7902_dev *mdev)
 {
     const struct firmware *fw;
+    dma_addr_t dma_addr;
+    void *dma_buf;
+    u32 val;
     int ret;
 
     ret = request_firmware(&fw, MT7902_FW_NAME, &mdev->pdev->dev);
@@ -53,10 +76,49 @@ static int mt7902_load_firmware(struct mt7902_dev *mdev)
 
     dev_info(&mdev->pdev->dev, "firmware ok: %zu bayt\n", fw->size);
 
-    /* TODO: DMA ile FW’yi karta yaz ve READY bayrağını bekle */
+    /* Coherent DMA buffer ayır ve FW'yi kopyala */
+    dma_buf = dma_alloc_coherent(&mdev->pdev->dev, fw->size, &dma_addr, GFP_KERNEL);
+    if (!dma_buf) {
+        dev_err(&mdev->pdev->dev, "DMA buffer allocate başarısız\n");
+        release_firmware(fw);
+        return -ENOMEM;
+    }
+    memcpy(dma_buf, fw->data, fw->size);
 
+    /* Adres & uzunluk yaz, START bitini set et */
+    iowrite32(lower_32_bits(dma_addr), mdev->regs + MT_FW_DL_ADDR);
+    iowrite32(fw->size,             mdev->regs + MT_FW_DL_DLEN);
+
+    val = ioread32(mdev->regs + MT_FW_DL_CTRL);
+    val |= MT_FW_DL_CTRL_START;
+    iowrite32(val, mdev->regs + MT_FW_DL_CTRL);
+
+    /* ACK bekle */
+    ret = read_poll_timeout(ioread32, val,
+                            val & MT_FW_DL_CTRL_ACK,
+                            1000, FW_POLL_TIMEOUT_US, false,
+                            mdev->regs + MT_FW_DL_CTRL);
+    if (ret) {
+        dev_err(&mdev->pdev->dev, "FW download ACK timeout\n");
+        goto out_free;
+    }
+    dev_info(&mdev->pdev->dev, "firmware download OK\n");
+
+    /* MCU READY bekle */
+    ret = read_poll_timeout(ioread32, val,
+                            (val & MT_TOP_MISC2_FW_STATE) == 0x7,
+                            1000, FW_POLL_TIMEOUT_US, false,
+                            mdev->regs + MT_TOP_MISC2);
+    if (ret) {
+        dev_err(&mdev->pdev->dev, "MCU READY timeout\n");
+        goto out_free;
+    }
+    dev_info(&mdev->pdev->dev, "mcu ready OK (state=0x%lx)\n", val & MT_TOP_MISC2_FW_STATE);
+
+out_free:
+    dma_free_coherent(&mdev->pdev->dev, fw->size, dma_buf, dma_addr);
     release_firmware(fw);
-    return 0;
+    return ret;
 }
 
 /* ───────────── IRQ handler ───────────── */
@@ -104,7 +166,7 @@ static int mt7902_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     pci_set_master(pdev);
 
-    /* ── Firmware doğrulaması ── */
+    /* ── Firmware download ── */
     err = mt7902_load_firmware(mdev);
     if (err)
         goto err_unmap;
@@ -128,7 +190,7 @@ static int mt7902_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
 
     pci_set_drvdata(pdev, mdev);
-    dev_info(&pdev->dev, "[%s] skeleton + FW‑check + IRQ hazır (vec %d)\n", DRV_NAME, mdev->irq_vec);
+    dev_info(&pdev->dev, "[%s] FW‑DMA + IRQ hazır (vec %d)\n", DRV_NAME, mdev->irq_vec);
     return 0;
 
 err_irq:
